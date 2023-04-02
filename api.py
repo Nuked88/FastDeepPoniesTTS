@@ -11,6 +11,16 @@ import numpy as np
 import gdown
 from tqdm import tqdm
 import re
+import torch.cuda as cuda
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+
+
+
+device = 'cuda' if cuda.is_available() else 'cpu'
+#device = "cpu"
+print (f"Using {device}")
 
 def download_dependencies():
     nltk.download('punkt')
@@ -72,9 +82,9 @@ def get_sentences(text):
 class DeepPoniesTTS():
     def __init__(self):
         self.g2p = G2p()
-        self.acoustic_model = torch.jit.load(Path(".") / "torchscript" / "acoustic_model.pt")
-        self.style_predictor = torch.jit.load(Path(".") / "torchscript" / "style_predictor.pt")        
-        self.vocoder = torch.jit.load(Path(".") / "torchscript" / "vocoder.pt")
+        self.acoustic_model = torch.jit.load(Path(".") / "torchscript" / "acoustic_model.pt").to(device)
+        self.style_predictor = torch.jit.load(Path(".") / "torchscript" / "style_predictor.pt").to(device)        
+        self.vocoder = torch.jit.load(Path(".") / "torchscript" / "vocoder.pt").to(device)
         self.tokenizer = AutoTokenizer.from_pretrained("prajjwal1/bert-tiny")
         self.normalizer = Normalizer(input_case='cased', lang='en')
         self.speaker2id = self.get_speaker2id()
@@ -112,64 +122,83 @@ class DeepPoniesTTS():
             dic[text] = phones
         return dic
 
+    def synthesize_sentence(self,sentence,speaker_ids,duration_control):
+        phone_ids = []
+        subsentences_style = []
+        for subsentence in split_arpabet(sentence):
+            if is_arpabet(subsentence):
+                for phone in subsentence.strip()[2:-2].split(" "):
+                    if "@" + phone in self.symbol2id:
+                        phone_ids.append(self.symbol2id["@" + phone])
+            else:
+                subsentences_style.append(subsentence)
+                subsentence = self.normalizer.normalize(subsentence, verbose=False)
+                for word in self.word_tokenizer.tokenize(subsentence):
+                    word = word.lower()
+                    if word in [".", "?", "!"]:
+                        phone_ids.append(self.symbol2id[word])
+                    elif word in [",", ";"]:
+                        phone_ids.append(self.symbol2id["@SILENCE"])
+                    elif word in self.lexicon:
+                        for phone in self.lexicon[word]:
+                            phone_ids.append(self.symbol2id["@" + phone])
+                        phone_ids.append(self.symbol2id["@BLANK"])
+                    else:
+                        for phone in self.g2p(word):
+                            phone_ids.append(self.symbol2id["@" + phone])
+                        phone_ids.append(self.symbol2id["@BLANK"])
+
+        subsentence_style = " ".join(subsentences_style)
+        encoding = self.tokenizer(
+            subsentence_style,
+            add_special_tokens=True,
+            padding=True, 
+            return_tensors="pt"
+        )
+        input_ids = encoding["input_ids"].to(device)
+        attention_mask = encoding["attention_mask"].to(device)
+        phone_ids = torch.LongTensor([phone_ids]).to(device)
+        with torch.no_grad():
+            style = self.style_predictor(input_ids.to(device), attention_mask.to(device))
+            mels = self.acoustic_model(
+                phone_ids.to(device),
+                speaker_ids.to(device),
+                style,
+                1.0,
+                duration_control
+            )
+            wave = self.vocoder(mels, speaker_ids, torch.FloatTensor([1.0]).to(device))
+            return wave.view(-1)
+
+
+
     def synthesize(self, text: str, speaker_name: str, duration_control: float=1.0, verbose: bool=True) -> np.ndarray:
         waves = []
         text = text.strip()
-        speaker_ids = torch.LongTensor([self.speaker2id[speaker_name]]) 
+        speaker_ids = torch.LongTensor([self.speaker2id[speaker_name]]).to(device)
+        #speaker_ids = torch.LongTensor([self.speaker2id[speaker_name]]) 
         if text[-1] not in [".", "?", "!"]:
             text = text + "."
-
+        
+        start_time = time.time() 
         sentences = get_sentences(text)
+        #sentences = [text]
+        
         if verbose:
             sentences = tqdm(sentences)
-        for sentence in sentences:
-            phone_ids = []
-            subsentences_style = []
-            for subsentence in split_arpabet(sentence):
-                if is_arpabet(subsentence):
-                    for phone in subsentence.strip()[2:-2].split(" "):
-                        if "@" + phone in self.symbol2id:
-                            phone_ids.append(self.symbol2id["@" + phone])
-                else:
-                    subsentences_style.append(subsentence)
-                    subsentence = self.normalizer.normalize(subsentence, verbose=False)
-                    for word in self.word_tokenizer.tokenize(subsentence):
-                        word = word.lower()
-                        if word in [".", "?", "!"]:
-                            phone_ids.append(self.symbol2id[word])
-                        elif word in [",", ";"]:
-                            phone_ids.append(self.symbol2id["@SILENCE"])
-                        elif word in self.lexicon:
-                            for phone in self.lexicon[word]:
-                                phone_ids.append(self.symbol2id["@" + phone])
-                            phone_ids.append(self.symbol2id["@BLANK"])
-                        else:
-                            for phone in self.g2p(word):
-                                phone_ids.append(self.symbol2id["@" + phone])
-                            phone_ids.append(self.symbol2id["@BLANK"])
             
-            subsentence_style = " ".join(subsentences_style)
-            encoding = self.tokenizer(
-                subsentence_style,
-                add_special_tokens=True,
-                padding=True, 
-                return_tensors="pt"
-            )
-            input_ids = encoding["input_ids"]
-            attention_mask = encoding["attention_mask"]
-            phone_ids = torch.LongTensor([phone_ids])
-            with torch.no_grad():
-                style = self.style_predictor(input_ids, attention_mask)
-                mels = self.acoustic_model(
-                    phone_ids,
-                    speaker_ids,
-                    style,
-                    1.0,
-                    duration_control
-                )
-                wave = self.vocoder(mels, speaker_ids, torch.FloatTensor([1.0]))
-                waves.append(wave.view(-1))
+        with ThreadPoolExecutor() as executor:
+            futures = [executor.submit(self.synthesize_sentence, sentence,speaker_ids,duration_control) for sentence in sentences]
+            waves = [future.result() for future in futures]
+            
+
         full_wave = torch.cat(waves, dim=0).cpu().numpy()
+        
+        end_time = time.time()  
+        elapsed_time = end_time - start_time  
+        
+        print(f"Time elapsed: {elapsed_time:.2f} seconds") 
+     
         return full_wave
 
 if __name__ == "__main__":
