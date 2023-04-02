@@ -17,7 +17,7 @@ To take advantage of these improvements, simply run the main.py file, which will
 
 To use this project, simply follow these steps:
 
-1. If you are on Linux, please run `pip install pynini==2.1.4` manually. On Windows, it is recommended to use a Conda environment; otherwise, it may be impossible to install Pynini. In this case, you will need to run `conda install -c conda-forge pynini` manually. Finally, on both systems, you can install the required dependencies by running `pip install -r requirements.txt`
+1. If you are on Linux, please run `pip install pynini==2.1.4` manually. On Windows, it is recommended to use a Conda environment; otherwise, it may be impossible to install Pynini. In this case, you will need to run `conda install -c conda-forge pynini` manually. Finally, on both systems, you can install the required dependencies by running `pip install -r requirements.txt` OR you can just install conda and run `conda env create --name ponyenv --file my_env.yml`
 
 2. Edit and run the `main.py` file.
 
