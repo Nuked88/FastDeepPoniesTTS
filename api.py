@@ -145,7 +145,11 @@ class DeepPoniesTTS():
                         phone_ids.append(self.symbol2id["@BLANK"])
                     else:
                         for phone in self.g2p(word):
-                            phone_ids.append(self.symbol2id["@" + phone])
+                            if "@" + phone in self.symbol2id:
+                                phone_ids.append(self.symbol2id["@" + phone])
+                            else:
+                                print(f"Phone not found: {phone}")
+                                phone_ids.append(self.symbol2id["@BLANK"])
                         phone_ids.append(self.symbol2id["@BLANK"])
 
         subsentence_style = " ".join(subsentences_style)
